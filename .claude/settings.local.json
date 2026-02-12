@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python -m nanobot:*)",
+      "Bash($env:PYTHONIOENCODING=\"utf-8\")",
+      "Bash(echo $ANTHROPIC_API_KEY)",
+      "Bash(echo:*)",
+      "Bash(python:*)",
+      "Bash(export PYTHONIOENCODING=utf-8)",
+      "Bash(iconv:*)",
+      "Bash(timeout:*)"
+    ]
+  }
+}

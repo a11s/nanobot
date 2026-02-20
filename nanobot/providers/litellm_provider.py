@@ -1,12 +1,14 @@
 """LiteLLM provider implementation for multi-provider support."""
 
+import asyncio
 import json
-import json_repair
 import os
 from typing import Any
 
+import json_repair
 import litellm
 from litellm import acompletion
+from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
@@ -14,6 +16,19 @@ from nanobot.providers.registry import find_by_model, find_gateway
 
 # Standard OpenAI chat-completion message keys; extras (e.g. reasoning_content) are stripped for strict providers.
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
+_RETRYABLE_LITELLM_ERRORS = (
+    litellm.APIConnectionError,
+    litellm.InternalServerError,
+    litellm.ServiceUnavailableError,
+    litellm.RateLimitError,
+    litellm.BadGatewayError,
+)
+_RETRYABLE_ERROR_HINTS = (
+    "server disconnected",
+    "connection reset",
+    "connection closed",
+    "timed out",
+)
 
 
 class LiteLLMProvider(LLMProvider):
@@ -163,6 +178,14 @@ class LiteLLMProvider(LLMProvider):
             sanitized.append(clean)
         return sanitized
 
+    @staticmethod
+    def _is_retryable_error(error: Exception) -> bool:
+        """Return True when the error is likely transient and worth retrying."""
+        if isinstance(error, _RETRYABLE_LITELLM_ERRORS):
+            return True
+        text = str(error).lower()
+        return any(hint in text for hint in _RETRYABLE_ERROR_HINTS)
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -220,15 +243,28 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
         
-        try:
-            response = await acompletion(**kwargs)
-            return self._parse_response(response)
-        except Exception as e:
-            # Return error as content for graceful handling
-            return LLMResponse(
-                content=f"Error calling LLM: {str(e)}",
-                finish_reason="error",
-            )
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await acompletion(**kwargs)
+                return self._parse_response(response)
+            except Exception as e:
+                if attempt < max_attempts and self._is_retryable_error(e):
+                    delay_s = 2 ** (attempt - 1)
+                    logger.warning(
+                        "Transient LLM error (attempt {}/{}): {}. Retrying in {}s",
+                        attempt,
+                        max_attempts,
+                        e,
+                        delay_s,
+                    )
+                    await asyncio.sleep(delay_s)
+                    continue
+                # Return error as content for graceful handling
+                return LLMResponse(
+                    content=f"Error calling LLM: {str(e)}",
+                    finish_reason="error",
+                )
     
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""
